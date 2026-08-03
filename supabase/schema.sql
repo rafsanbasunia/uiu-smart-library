@@ -107,3 +107,112 @@ create table if not exists digital_assets (
   url         text,
   access_rule text not null default 'campus'
 );
+
+-- ---------------------------------------------------------------- circulation
+create table if not exists loan_rules (
+  role          user_role primary key,
+  max_items     int not null,
+  loan_days     int not null,
+  max_renewals  int not null
+);
+
+create table if not exists loans (
+  id             uuid primary key default gen_random_uuid(),
+  copy_id        uuid not null references copies(id),
+  title_id       uuid not null references titles(id),
+  user_id        uuid not null references users(id) on delete cascade,
+  issued_at      timestamptz not null default now(),
+  due_at         timestamptz not null,
+  returned_at    timestamptz,
+  renewals_count int not null default 0,
+  issued_by      uuid references users(id)
+);
+
+create table if not exists holds (
+  id        uuid primary key default gen_random_uuid(),
+  title_id  uuid not null references titles(id) on delete cascade,
+  copy_id   uuid references copies(id),
+  user_id   uuid not null references users(id) on delete cascade,
+  placed_at timestamptz not null default now(),
+  status    hold_status not null default 'queued',
+  ready_at  timestamptz,
+  expires_at timestamptz
+);
+
+-- ---------------------------------------------------------------- fines
+create table if not exists fines (
+  id        uuid primary key default gen_random_uuid(),
+  user_id   uuid not null references users(id) on delete cascade,
+  loan_id   uuid references loans(id) on delete set null,
+  title_id  uuid references titles(id),
+  amount    numeric(10,2) not null,
+  days_late int not null default 0,
+  reason    text not null default 'Overdue return',
+  posted_at timestamptz not null default now(),
+  status    fine_status not null default 'unpaid'
+);
+
+create table if not exists payments (
+  id        uuid primary key default gen_random_uuid(),
+  user_id   uuid not null references users(id) on delete cascade,
+  amount    numeric(10,2) not null,
+  method    pay_method not null,
+  reference text not null,
+  paid_at   timestamptz not null default now()
+);
+
+create table if not exists ledger_entries (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null references users(id) on delete cascade,
+  type          ledger_type not null,
+  amount        numeric(10,2) not null,
+  description   text not null,
+  balance_after numeric(10,2) not null default 0,
+  created_at    timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------- discovery
+create table if not exists ratings (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references users(id) on delete cascade,
+  title_id   uuid not null references titles(id) on delete cascade,
+  stars      int not null check (stars between 1 and 5),
+  review     text,
+  created_at timestamptz not null default now(),
+  unique (user_id, title_id)
+);
+
+create table if not exists interests (
+  id   uuid primary key default gen_random_uuid(),
+  name text unique not null
+);
+
+create table if not exists user_interests (
+  user_id     uuid references users(id) on delete cascade,
+  interest_id uuid references interests(id) on delete cascade,
+  weight      int not null default 1,
+  primary key (user_id, interest_id)
+);
+
+create table if not exists reco_settings (
+  user_id     uuid primary key references users(id) on delete cascade,
+  mode        reco_mode not null default 'balanced',
+  use_history boolean not null default true,
+  use_trends  boolean not null default true
+);
+
+create table if not exists reading_lists (
+  id          uuid primary key default gen_random_uuid(),
+  owner_id    uuid not null references users(id) on delete cascade,
+  name        text not null,
+  description text,
+  visibility  list_visibility not null default 'private',
+  course_id   uuid references courses(id) on delete set null,
+  share_slug  text unique,
+  created_at  timestamptz not null default now()
+);
+
+create table if not exists reading_list_items (
+  id       uuid primary key default gen_random_uuid(),
+  list_id  uuid not null references reading_lists(id) on delete cascade,
+  title_id uuid not null references titles(id) on delete cascade,
