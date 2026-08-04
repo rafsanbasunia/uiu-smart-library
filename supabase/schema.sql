@@ -216,3 +216,106 @@ create table if not exists reading_list_items (
   id       uuid primary key default gen_random_uuid(),
   list_id  uuid not null references reading_lists(id) on delete cascade,
   title_id uuid not null references titles(id) on delete cascade,
+  note     text,
+  read_at  timestamptz,
+  added_at timestamptz not null default now(),
+  unique (list_id, title_id)
+);
+
+create table if not exists bookmarks (
+  user_id   uuid references users(id) on delete cascade,
+  title_id  uuid references titles(id) on delete cascade,
+  added_at  timestamptz not null default now(),
+  primary key (user_id, title_id)
+);
+
+create table if not exists saved_searches (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references users(id) on delete cascade,
+  label      text not null,
+  query      text not null,
+  filters    jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists course_reserves (
+  course_id uuid references courses(id) on delete cascade,
+  title_id  uuid references titles(id) on delete cascade,
+  primary key (course_id, title_id)
+);
+
+-- ---------------------------------------------------------------- facilities
+create table if not exists rooms (
+  id       uuid primary key default gen_random_uuid(),
+  name     text unique not null,
+  capacity int not null,
+  floor    text not null,
+  features text[] not null default '{}'
+);
+
+create table if not exists room_bookings (
+  id            uuid primary key default gen_random_uuid(),
+  room_id       uuid not null references rooms(id) on delete cascade,
+  user_id       uuid not null references users(id) on delete cascade,
+  slot_start    timestamptz not null,
+  slot_end      timestamptz not null,
+  checked_in_at timestamptz,
+  status        booking_status not null default 'booked',
+  created_at    timestamptz not null default now()
+);
+
+create table if not exists occupancy_readings (
+  id          uuid primary key default gen_random_uuid(),
+  zone        text not null,
+  seats_total int not null,
+  seats_taken int not null,
+  recorded_at timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------- messaging
+create table if not exists notifications (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references users(id) on delete cascade,
+  type       text not null,
+  title      text not null,
+  body       text not null,
+  href       text,
+  created_at timestamptz not null default now(),
+  read_at    timestamptz
+);
+
+-- ---------------------------------------------------------------- search
+alter table titles add column if not exists search_tsv tsvector;
+
+create or replace function titles_search_refresh(p_title uuid) returns void as $$
+begin
+  update titles t set search_tsv =
+      setweight(to_tsvector('english', coalesce(t.title,'')), 'A')
+   || setweight(to_tsvector('english', coalesce(t.subtitle,'')), 'B')
+   || setweight(to_tsvector('english', coalesce((
+        select string_agg(a.name,' ') from title_authors ta
+        join authors a on a.id = ta.author_id where ta.title_id = t.id),'')), 'B')
+   || setweight(to_tsvector('english', coalesce((
+        select string_agg(s.name,' ') from title_subjects ts
+        join subjects s on s.id = ts.subject_id where ts.title_id = t.id),'')), 'C')
+   || setweight(to_tsvector('english', coalesce(t.summary,'')), 'D')
+  where t.id = p_title;
+end; $$ language plpgsql;
+
+-- ---------------------------------------------------------------- indexes
+create index if not exists titles_search_idx      on titles using gin (search_tsv);
+create index if not exists titles_trgm_idx        on titles using gin (title gin_trgm_ops);
+create index if not exists copies_title_status_ix on copies (title_id, status);
+create index if not exists loans_user_open_ix     on loans (user_id, returned_at);
+create index if not exists holds_title_queue_ix   on holds (title_id, placed_at);
+create index if not exists notif_user_ix          on notifications (user_id, created_at desc);
+create index if not exists bookings_slot_ix       on room_bookings (room_id, slot_start);
+
+-- ---------------------------------------------------------------- views
+create or replace view title_availability as
+select t.id as title_id,
+       count(c.id)                                              as copies_total,
+       count(c.id) filter (where c.status = 'available')        as copies_available,
+       min(c.due_back) filter (where c.status = 'on_loan')      as next_due
+from titles t left join copies c on c.title_id = t.id
+group by t.id;
