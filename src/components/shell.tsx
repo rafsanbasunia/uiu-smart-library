@@ -192,3 +192,197 @@ function QuickSearch() {
         placeholder="Search the catalogue — title, author, subject, ISBN"
         aria-label="Search the catalogue"
         aria-expanded={open && hits.length > 0}
+        aria-autocomplete="list"
+        className="input py-2 pl-9 pr-3"
+      />
+
+      {open && hits.length > 0 && (
+        <ul className="card rise absolute left-0 right-0 top-11 z-30 overflow-hidden p-0" role="listbox">
+          {hits.map((h, i) => (
+            <li key={h.id} role="option" aria-selected={i === cursor}>
+              <Link
+                href={`/titles/${h.id}`}
+                onClick={() => setOpen(false)}
+                onMouseEnter={() => setCursor(i)}
+                className={`flex items-center gap-3 border-b border-line-2 px-3 py-2 transition last:border-0 ${
+                  i === cursor ? 'bg-paper-2' : ''
+                }`}
+              >
+                <span
+                  className="h-8 w-6 shrink-0 rounded-[2px]"
+                  style={{ background: `linear-gradient(150deg, oklch(58% .13 ${h.cover_hue}), oklch(38% .11 ${h.cover_hue + 18}))` }}
+                  aria-hidden
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] font-medium">{h.title}</span>
+                  <span className="block truncate text-[11px] text-ink-3">
+                    {h.authors[0] ?? 'Unknown author'} · {h.type}
+                  </span>
+                </span>
+              </Link>
+            </li>
+          ))}
+          <li>
+            <button
+              type="submit"
+              className="w-full border-t border-line px-3 py-2 text-left text-[12px] text-brand transition hover:bg-paper-2"
+            >
+              See all results for “{q}”
+            </button>
+          </li>
+        </ul>
+      )}
+    </form>
+  )
+}
+
+/* ============================================================ notifications */
+
+function NotificationBell({ unread, items }: { unread: number; items: NotificationRow[] }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const [, start] = useTransition()
+  const router = useRouter()
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  async function markAll() {
+    await fetch('/api/notifications/read', { method: 'POST' })
+    start(() => router.refresh())
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        className="btn btn-ghost relative size-9 p-0"
+        onClick={() => { setOpen((o) => !o); if (!open && unread) markAll() }}
+        aria-label={`Notifications${unread ? `, ${unread} unread` : ''}`}
+      >
+        <IconBell className="size-[18px]" />
+        {unread > 0 && (
+          <span className="absolute -right-1 -top-1 grid min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-semibold leading-4 text-white">
+            {unread}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="card rise absolute right-0 top-11 z-30 w-[330px] overflow-hidden p-0">
+          <div className="flex items-center justify-between border-b border-line px-3.5 py-2.5">
+            <span className="text-sm font-medium">Notifications</span>
+            <span className="text-[11px] text-ink-3">In-app only</span>
+          </div>
+          <div className="max-h-[340px] overflow-y-auto">
+            {items.length === 0 && <p className="px-3.5 py-8 text-center text-sm text-ink-3">Nothing yet.</p>}
+            {items.map((n) => (
+              <Link
+                key={n.id}
+                href={n.href ?? '#'}
+                onClick={() => setOpen(false)}
+                className="block border-b border-line-2 px-3.5 py-3 transition last:border-0 hover:bg-paper-2"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <span className={`text-sm ${n.read_at ? 'font-normal' : 'font-medium'}`}>{n.title}</span>
+                  <span className="shrink-0 text-[11px] text-ink-3">{timeAgo(n.created_at)}</span>
+                </div>
+                <p className="mt-0.5 text-[13px] leading-snug text-ink-2">{n.body}</p>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ============================================================ theme */
+
+function ThemeToggle() {
+  const [theme, setTheme] = useState<'light' | 'dark' | null>(null)
+
+  useEffect(() => {
+    const saved = (localStorage.getItem('uiu-theme') as 'light' | 'dark' | null)
+    setTheme(saved ?? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
+  }, [])
+
+  function toggle() {
+    const next = theme === 'dark' ? 'light' : 'dark'
+    setTheme(next)
+    document.documentElement.dataset.theme = next
+    try { localStorage.setItem('uiu-theme', next) } catch {}
+  }
+
+  return (
+    <button className="btn btn-ghost size-9 p-0" onClick={toggle} aria-label="Switch colour theme">
+      {theme === 'dark' ? <IconSun className="size-[18px]" /> : <IconMoon className="size-[18px]" />}
+    </button>
+  )
+}
+
+/* ============================================================ account */
+
+function AccountMenu({ user, accounts }: { user: SessionUser; accounts: SessionUser[] }) {
+  const [open, setOpen] = useState(false)
+  const router = useRouter()
+  const [, start] = useTransition()
+
+  async function switchTo(id: string) {
+    await fetch('/api/session/switch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userId: id }),
+    })
+    setOpen(false)
+    start(() => { router.push(accounts.find((a) => a.id === id)?.role === 'staff' ? '/staff' : '/search'); router.refresh() })
+  }
+
+  const ROLE_LABEL: Record<string, string> = { student: 'Student', faculty: 'Faculty', staff: 'Library staff' }
+
+  return (
+    <div className="relative">
+      {open && (
+        <div className="card rise absolute bottom-full left-0 mb-2 w-full overflow-hidden p-0">
+          <div className="label-eyebrow border-b border-line px-3 py-2">Switch role · demo</div>
+          <div className="max-h-64 overflow-y-auto">
+            {accounts.map((a) => (
+              <button
+                key={a.id}
+                onClick={() => switchTo(a.id)}
+                className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-paper-2 ${
+                  a.id === user.id ? 'bg-brand-soft' : ''
+                }`}
+              >
+                <Avatar name={a.name} hue={a.avatar_hue} size={26} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] font-medium">{a.name}</span>
+                  <span className="block truncate text-[11px] text-ink-3">{ROLE_LABEL[a.role]}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          <form action="/api/session/signout" method="post" className="border-t border-line">
+            <button className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[13px] text-ink-2 transition hover:bg-paper-2">
+              <IconLogout className="size-4" /> Sign out
+            </button>
+          </form>
+        </div>
+      )}
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition hover:bg-paper-2"
+      >
+        <Avatar name={user.name} hue={user.avatar_hue} size={32} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] font-medium">{user.name}</span>
+          <span className="block truncate text-[11px] text-ink-3">{ROLE_LABEL[user.role]} · {user.uiu_id}</span>
+        </span>
+        <IconChevron className={`size-4 shrink-0 text-ink-3 transition ${open ? '-rotate-90' : 'rotate-90'}`} />
+      </button>
+    </div>
+  )
+}
