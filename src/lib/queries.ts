@@ -186,3 +186,144 @@ export async function getRelatedTitles(titleId: string, limit = 6) {
 /* ============================================================ circulation */
 
 export async function getMyLoans(userId: string) {
+  return sql<LoanRow[]>`
+    select l.id, l.title_id, t.title, t.type::text, t.cover_hue, c.accession_number,
+           l.issued_at, l.due_at, l.returned_at, l.renewals_count,
+           coalesce((select array_agg(a.name order by ta.ord) from title_authors ta
+                     join authors a on a.id=ta.author_id where ta.title_id=t.id),'{}') as authors,
+           (select count(*)::int from holds h where h.title_id = t.id and h.status = 'queued') as queued_behind
+    from loans l
+    join copies c on c.id = l.copy_id
+    join titles t on t.id = l.title_id
+    where l.user_id = ${userId} and l.returned_at is null
+    order by l.due_at asc`
+}
+
+export async function getMyHistory(userId: string, limit = 40) {
+  return sql<LoanRow[]>`
+    select l.id, l.title_id, t.title, t.type::text, t.cover_hue, c.accession_number,
+           l.issued_at, l.due_at, l.returned_at, l.renewals_count,
+           coalesce((select array_agg(a.name order by ta.ord) from title_authors ta
+                     join authors a on a.id=ta.author_id where ta.title_id=t.id),'{}') as authors,
+           0 as queued_behind
+    from loans l join copies c on c.id = l.copy_id join titles t on t.id = l.title_id
+    where l.user_id = ${userId} and l.returned_at is not null
+    order by l.returned_at desc limit ${limit}`
+}
+
+export async function getMyHolds(userId: string) {
+  return sql<HoldRow[]>`
+    select h.id, h.title_id, t.title, t.type::text, t.cover_hue, h.status::text,
+           h.placed_at, h.ready_at, h.expires_at,
+           (select count(*)::int + 1 from holds h2
+            where h2.title_id = h.title_id and h2.status = 'queued' and h2.placed_at < h.placed_at) as queue_position,
+           coalesce((select count(*)::int from copies c where c.title_id = h.title_id), 0) as copies_total
+    from holds h join titles t on t.id = h.title_id
+    where h.user_id = ${userId} and h.status in ('queued','ready')
+    order by h.placed_at asc`
+}
+
+export async function getHoldForTitle(userId: string, titleId: string) {
+  const rows = await sql<{ id: string; status: string; queue_position: number }[]>`
+    select h.id, h.status::text,
+           (select count(*)::int + 1 from holds h2
+            where h2.title_id = h.title_id and h2.status='queued' and h2.placed_at < h.placed_at) as queue_position
+    from holds h where h.user_id = ${userId} and h.title_id = ${titleId} and h.status in ('queued','ready')`
+  return rows[0] ?? null
+}
+
+export async function getLoanRules(role: string) {
+  const rows = await sql<{ max_items: number; loan_days: number; max_renewals: number }[]>`
+    select max_items, loan_days, max_renewals from loan_rules where role = ${role}::user_role`
+  return rows[0] ?? { max_items: 5, loan_days: 14, max_renewals: 2 }
+}
+
+/* ============================================================ fines */
+
+export async function getMyFines(userId: string) {
+  const fines = await sql<{ id: string; amount: string; days_late: number; reason: string; posted_at: string; status: string; title: string | null }[]>`
+    select f.id, f.amount, f.days_late, f.reason, f.posted_at, f.status::text, t.title
+    from fines f left join titles t on t.id = f.title_id
+    where f.user_id = ${userId} order by f.posted_at desc`
+  const ledger = await sql<{ id: string; type: string; amount: string; description: string; created_at: string }[]>`
+    select id, type::text, amount, description, created_at
+    from ledger_entries where user_id = ${userId} order by created_at desc limit 30`
+  const payments = await sql<{ id: string; amount: string; method: string; reference: string; paid_at: string }[]>`
+    select id, amount, method::text, reference, paid_at from payments where user_id = ${userId} order by paid_at desc`
+  const outstanding = fines.filter((f) => f.status === 'unpaid').reduce((s, f) => s + Number(f.amount), 0)
+  return { fines, ledger, payments, outstanding }
+}
+
+/* ============================================================ lists */
+
+export async function getMyLists(userId: string) {
+  return sql<{ id: string; name: string; description: string | null; visibility: string; share_slug: string; course_code: string | null; item_count: number; read_count: number; hues: number[] }[]>`
+    select rl.id, rl.name, rl.description, rl.visibility::text, rl.share_slug, c.code as course_code,
+           count(i.id)::int as item_count,
+           count(i.read_at)::int as read_count,
+           coalesce(array_agg(t.cover_hue) filter (where t.cover_hue is not null), '{}') as hues
+    from reading_lists rl
+    left join courses c on c.id = rl.course_id
+    left join reading_list_items i on i.list_id = rl.id
+    left join titles t on t.id = i.title_id
+    where rl.owner_id = ${userId}
+    group by rl.id, c.code
+    order by rl.created_at desc`
+}
+
+export async function getList(listId: string) {
+  const rows = await sql<{ id: string; owner_id: string; name: string; description: string | null; visibility: string; share_slug: string; owner_name: string; course_code: string | null }[]>`
+    select rl.*, u.name as owner_name, c.code as course_code
+    from reading_lists rl join users u on u.id = rl.owner_id
+    left join courses c on c.id = rl.course_id
+    where rl.id = ${listId}`
+  if (!rows[0]) return null
+  const items = await sql<(SearchResult & { item_id: string; read_at: string | null; note: string | null })[]>`
+    select i.id as item_id, i.read_at, i.note, t.*,
+           coalesce(av.copies_available,0) as copies_available, coalesce(av.copies_total,0) as copies_total, av.next_due,
+           coalesce((select array_agg(a.name order by ta.ord) from title_authors ta
+                     join authors a on a.id=ta.author_id where ta.title_id=t.id),'{}') as authors,
+           '{}'::text[] as subjects
+    from reading_list_items i join titles t on t.id = i.title_id
+    left join title_availability av on av.title_id = t.id
+    where i.list_id = ${listId} order by i.added_at`
+  return { ...rows[0], items }
+}
+
+export async function getBookmarks(userId: string) {
+  return sql<SearchResult[]>`
+    select t.*, coalesce(av.copies_available,0) as copies_available, coalesce(av.copies_total,0) as copies_total, av.next_due,
+           coalesce((select array_agg(a.name order by ta.ord) from title_authors ta
+                     join authors a on a.id=ta.author_id where ta.title_id=t.id),'{}') as authors,
+           '{}'::text[] as subjects
+    from bookmarks b join titles t on t.id = b.title_id
+    left join title_availability av on av.title_id = t.id
+    where b.user_id = ${userId} order by b.added_at desc`
+}
+
+export async function getMyCourses(userId: string) {
+  return sql<{ id: string; code: string; title: string; reserve_count: number }[]>`
+    select c.id, c.code, c.title, (select count(*)::int from course_reserves cr where cr.course_id = c.id) as reserve_count
+    from enrollments e join courses c on c.id = e.course_id
+    where e.user_id = ${userId} order by c.code`
+}
+
+/* ============================================================ rooms */
+
+export async function getRooms() {
+  return sql<{ id: string; name: string; capacity: number; floor: string; features: string[] }[]>`
+    select id, name, capacity, floor, features from rooms order by floor, name`
+}
+
+export async function getBookingsForDate(date: string) {
+  return sql<{ id: string; room_id: string; user_id: string; slot_start: string; slot_end: string; status: string; user_name: string }[]>`
+    select b.id, b.room_id, b.user_id, b.slot_start, b.slot_end, b.status::text, u.name as user_name
+    from room_bookings b join users u on u.id = b.user_id
+    where (b.slot_start at time zone 'Asia/Dhaka')::date = ${date}::date
+      and b.status in ('booked','checked_in')`
+}
+
+export async function getMyBookings(userId: string) {
+  return sql<{ id: string; room_name: string; floor: string; slot_start: string; slot_end: string; status: string; checked_in_at: string | null }[]>`
+    select b.id, r.name as room_name, r.floor, b.slot_start, b.slot_end, b.status::text, b.checked_in_at
+    from room_bookings b join rooms r on r.id = b.room_id
