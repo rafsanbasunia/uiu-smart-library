@@ -87,3 +87,79 @@ export async function cancelHold(userId: string, holdId: string) {
   if (!hold) throw new RuleError('Reservation not found', 404)
   if (hold.user_id !== userId) throw new RuleError('That reservation is not yours', 403)
   await sql`update holds set status = 'cancelled' where id = ${holdId}`
+  if (hold.copy_id) await sql`update copies set status = 'available' where id = ${hold.copy_id}`
+  return { ok: true }
+}
+
+/* ============================================================ renewals */
+
+export async function renewLoan(userId: string, loanId: string) {
+  const [loan] = await sql<{ id: string; user_id: string; title_id: string; due_at: string; renewals_count: number; title: string }[]>`
+    select l.id, l.user_id, l.title_id, l.due_at, l.renewals_count, t.title
+    from loans l join titles t on t.id = l.title_id
+    where l.id = ${loanId} and l.returned_at is null`
+  if (!loan) throw new RuleError('Loan not found', 404)
+  if (loan.user_id !== userId) throw new RuleError('That loan is not yours', 403)
+
+  const rules = await rulesFor(userId)
+  if (loan.renewals_count >= rules.max_renewals) {
+    throw new RuleError(`This item has already been renewed ${rules.max_renewals} times.`)
+  }
+
+  const [{ waiting }] = await sql<{ waiting: string }[]>`
+    select count(*)::text as waiting from holds where title_id = ${loan.title_id} and status = 'queued'`
+  if (Number(waiting) > 0) {
+    throw new RuleError(`Another reader is waiting for this title, so it cannot be renewed.`)
+  }
+
+  const base = new Date(loan.due_at) > new Date() ? new Date(loan.due_at) : new Date()
+  const due = new Date(base.getTime() + rules.loan_days * 86400000)
+  await sql`update loans set due_at = ${due}, renewals_count = renewals_count + 1 where id = ${loanId}`
+  await sql`update copies set due_back = ${due} where id = (select copy_id from loans where id = ${loanId})`
+  await notify(userId, 'renewed', 'Loan renewed',
+    `“${loan.title}” is now due back on ${due.toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })}.`, '/loans')
+  return { due_at: due, renewals_count: loan.renewals_count + 1 }
+}
+
+/* ============================================================ desk */
+
+export async function issueCopy(staffId: string, accession: string, memberCode: string) {
+  const [copy] = await sql<{ id: string; title_id: string; status: string; copy_type: string; title: string }[]>`
+    select c.id, c.title_id, c.status::text, c.copy_type::text, t.title
+    from copies c join titles t on t.id = c.title_id where c.accession_number = ${accession}`
+  if (!copy) throw new RuleError(`No copy with accession number ${accession}`, 404)
+  if (copy.copy_type === 'reference') throw new RuleError('Reference copies cannot leave the library.')
+  if (copy.status === 'on_loan') throw new RuleError('That copy is already on loan.')
+  if (copy.status === 'lost' || copy.status === 'repair') throw new RuleError(`That copy is marked ${copy.status}.`)
+
+  const [member] = await sql<{ id: string; name: string; role: string }[]>`
+    select id, name, role::text from users where uiu_id = ${memberCode} or email = ${memberCode}`
+  if (!member) throw new RuleError(`No member with ID ${memberCode}`, 404)
+
+  const rules = await rulesFor(member.id)
+  const [{ count }] = await sql<{ count: string }[]>`
+    select count(*)::text as count from loans where user_id = ${member.id} and returned_at is null`
+  if (Number(count) >= rules.max_items) {
+    throw new RuleError(`${member.name} already has ${count} items out (limit ${rules.max_items}).`)
+  }
+
+  // A held copy may only be issued to the reader it is being held for.
+  if (copy.status === 'held') {
+    const [hold] = await sql<{ user_id: string }[]>`
+      select user_id from holds where copy_id = ${copy.id} and status = 'ready'`
+    if (hold && hold.user_id !== member.id) {
+      throw new RuleError('That copy is being held for another reader.')
+    }
+    if (hold) await sql`update holds set status = 'collected' where copy_id = ${copy.id} and status = 'ready'`
+  }
+
+  const due = new Date(Date.now() + rules.loan_days * 86400000)
+  const [loan] = await sql<{ id: string }[]>`
+    insert into loans (copy_id, title_id, user_id, due_at, issued_by)
+    values (${copy.id}, ${copy.title_id}, ${member.id}, ${due}, ${staffId}) returning id`
+  await sql`update copies set status = 'on_loan', due_back = ${due} where id = ${copy.id}`
+  await notify(member.id, 'issued', 'Item issued',
+    `“${copy.title}” is due back on ${due.toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })}.`, '/loans')
+  return { loanId: loan!.id, member: member.name, title: copy.title, due_at: due }
+}
+
