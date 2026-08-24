@@ -163,3 +163,86 @@ export async function issueCopy(staffId: string, accession: string, memberCode: 
   return { loanId: loan!.id, member: member.name, title: copy.title, due_at: due }
 }
 
+export async function returnCopy(accession: string) {
+  const [copy] = await sql<{ id: string; title_id: string; title: string }[]>`
+    select c.id, c.title_id, t.title from copies c join titles t on t.id = c.title_id
+    where c.accession_number = ${accession}`
+  if (!copy) throw new RuleError(`No copy with accession number ${accession}`, 404)
+
+  const [loan] = await sql<{ id: string; user_id: string; due_at: string }[]>`
+    select id, user_id, due_at from loans where copy_id = ${copy.id} and returned_at is null`
+  if (!loan) throw new RuleError('That copy is not currently on loan.')
+
+  await sql`update loans set returned_at = now() where id = ${loan.id}`
+
+  // Overdue charge, posted the moment the item comes back.
+  const daysLate = Math.floor((Date.now() - new Date(loan.due_at).getTime()) / 86400000)
+  let fine = 0
+  if (daysLate > 0) {
+    fine = daysLate * FINE_PER_DAY
+    await sql`insert into fines (user_id, loan_id, title_id, amount, days_late, reason)
+              values (${loan.user_id}, ${loan.id}, ${copy.title_id}, ${fine}, ${daysLate}, 'Overdue return')`
+    await addLedger(loan.user_id, 'charge', fine, `Overdue — ${copy.title} (${daysLate} day${daysLate > 1 ? 's' : ''})`)
+    await notify(loan.user_id, 'fine', 'Overdue charge posted',
+      `“${copy.title}” came back ${daysLate} day${daysLate > 1 ? 's' : ''} late. ৳${fine} has been added to your account.`, '/fines')
+  }
+
+  // Promote the next reader in the queue onto this copy.
+  const [next] = await sql<{ id: string; user_id: string }[]>`
+    select id, user_id from holds where title_id = ${copy.title_id} and status = 'queued'
+    order by placed_at limit 1`
+  if (next) {
+    await sql`update holds set status='ready', copy_id=${copy.id}, ready_at=now(),
+              expires_at = now() + interval '48 hours' where id = ${next.id}`
+    await sql`update copies set status='held', due_back=null where id = ${copy.id}`
+    await notify(next.user_id, 'hold_ready', 'Ready for pickup',
+      `“${copy.title}” is now waiting at the circulation desk. Collect it within 48 hours.`, '/loans')
+  } else {
+    await sql`update copies set status='available', due_back=null where id = ${copy.id}`
+  }
+
+  return { title: copy.title, daysLate: Math.max(0, daysLate), fine, promoted: Boolean(next) }
+}
+
+/* ============================================================ fines */
+
+export async function addLedger(userId: string, type: 'charge' | 'payment' | 'waiver', amount: number, description: string) {
+  const [{ balance }] = await sql<{ balance: string }[]>`
+    select coalesce((select balance_after from ledger_entries where user_id = ${userId}
+                     order by created_at desc limit 1), 0)::text as balance`
+  const next = type === 'charge' ? Number(balance) + amount : Number(balance) - amount
+  await sql`insert into ledger_entries (user_id, type, amount, description, balance_after)
+            values (${userId}, ${type}::ledger_type, ${amount}, ${description}, ${next})`
+}
+
+/**
+ * Simulated payment. No merchant gateway is wired up, so the member presses
+ * Pay and the charge settles. 'nagad' stays in the enum for records already
+ * written against it.
+ */
+export const PAY_LABEL: Record<string, string> = {
+  bkash: 'bKash', rocket: 'Rocket', nagad: 'Nagad', card: 'Card',
+}
+
+export async function payFines(userId: string, method: 'bkash' | 'rocket' | 'card') {
+  const unpaid = await sql<{ id: string; amount: string }[]>`
+    select id, amount from fines where user_id = ${userId} and status = 'unpaid'`
+  if (unpaid.length === 0) throw new RuleError('There is nothing outstanding to pay.')
+
+  const total = unpaid.reduce((s, f) => s + Number(f.amount), 0)
+  const reference = `${method.slice(0, 3).toUpperCase()}-${Math.floor(100000 + Math.random() * 899999)}`
+
+  await sql`update fines set status = 'paid' where user_id = ${userId} and status = 'unpaid'`
+  await sql`insert into payments (user_id, amount, method, reference)
+            values (${userId}, ${total}, ${method}::pay_method, ${reference})`
+  await addLedger(userId, 'payment', total, `${PAY_LABEL[method] ?? method} payment ${reference}`)
+  await notify(userId, 'payment', 'Payment received',
+    `৳${total} settled by ${PAY_LABEL[method] ?? method}. Reference ${reference}.`, '/fines')
+  return { total, reference, cleared: unpaid.length }
+}
+
+/* ============================================================ rooms */
+
+export async function bookRoom(userId: string, roomId: string, slotStart: string) {
+  const start = new Date(slotStart)
+  if (Number.isNaN(start.getTime())) throw new RuleError('Invalid slot')
