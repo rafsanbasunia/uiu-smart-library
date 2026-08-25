@@ -246,3 +246,85 @@ export async function payFines(userId: string, method: 'bkash' | 'rocket' | 'car
 export async function bookRoom(userId: string, roomId: string, slotStart: string) {
   const start = new Date(slotStart)
   if (Number.isNaN(start.getTime())) throw new RuleError('Invalid slot')
+  const end = new Date(start.getTime() + SLOT_HOURS * 3600000)
+
+  // Opening hours are Dhaka wall-clock, not the server's timezone.
+  const hour = libraryHour(start)
+  if (hour < OPEN_HOUR || hour >= CLOSE_HOUR) {
+    throw new RuleError(`Rooms are bookable between ${String(OPEN_HOUR).padStart(2, '0')}:00 and ${CLOSE_HOUR}:00.`)
+  }
+  if (end.getTime() < Date.now()) throw new RuleError('That slot has already passed.')
+
+  const [clash] = await sql`
+    select 1 from room_bookings
+    where room_id = ${roomId} and status in ('booked','checked_in')
+      and slot_start < ${end} and slot_end > ${start}`
+  if (clash) throw new RuleError('That slot has just been taken.')
+
+  const [mine] = await sql`
+    select 1 from room_bookings where user_id = ${userId} and status in ('booked','checked_in')
+      and slot_start < ${end} and slot_end > ${start}`
+  if (mine) throw new RuleError('You already have a room booked for that time.')
+
+  const [{ count }] = await sql<{ count: string }[]>`
+    select count(*)::text as count from room_bookings
+    where user_id = ${userId} and status = 'booked'
+      and (slot_start at time zone ${LIBRARY_TZ})::date = ${libraryDate(start)}::date`
+  if (Number(count) >= 2) throw new RuleError('Two slots per day is the limit.')
+
+  const [room] = await sql<{ name: string }[]>`select name from rooms where id = ${roomId}`
+  const [booking] = await sql<{ id: string }[]>`
+    insert into room_bookings (room_id, user_id, slot_start, slot_end)
+    values (${roomId}, ${userId}, ${start}, ${end}) returning id`
+  await notify(userId, 'room', 'Room booked',
+    `${room?.name} is reserved for you on ${start.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: LIBRARY_TZ })} at ${start.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: LIBRARY_TZ })}. Check in within 15 minutes or the slot is released.`, '/rooms')
+  return { id: booking!.id }
+}
+
+export async function cancelBooking(userId: string, bookingId: string) {
+  const [b] = await sql<{ user_id: string }[]>`select user_id from room_bookings where id = ${bookingId}`
+  if (!b) throw new RuleError('Booking not found', 404)
+  if (b.user_id !== userId) throw new RuleError('That booking is not yours', 403)
+  await sql`update room_bookings set status='cancelled' where id = ${bookingId}`
+  return { ok: true }
+}
+
+export async function checkInBooking(userId: string, bookingId: string) {
+  const [b] = await sql<{ user_id: string; slot_start: string; status: string }[]>`
+    select user_id, slot_start, status::text from room_bookings where id = ${bookingId}`
+  if (!b) throw new RuleError('Booking not found', 404)
+  if (b.user_id !== userId) throw new RuleError('That booking is not yours', 403)
+  if (b.status === 'checked_in') throw new RuleError('Already checked in.')
+  const mins = (Date.now() - new Date(b.slot_start).getTime()) / 60000
+  if (mins < -10) throw new RuleError('You can check in from 10 minutes before the slot starts.')
+  if (mins > 15) throw new RuleError('Check-in closed — the slot was auto-released after 15 minutes.')
+  await sql`update room_bookings set status='checked_in', checked_in_at=now() where id = ${bookingId}`
+  return { ok: true }
+}
+
+/**
+ * Auto-release: any slot whose reader did not check in within 15 minutes goes
+ * back into the pool. Runs opportunistically whenever the rooms page loads,
+ * which stands in for the scheduled job described in the plan.
+ */
+export async function releaseStaleBookings() {
+  const released = await sql<{ id: string; user_id: string }[]>`
+    update room_bookings set status = 'released'
+    where status = 'booked' and checked_in_at is null and slot_start < now() - interval '15 minutes'
+    returning id, user_id`
+  return released.length
+}
+
+/* ============================================================ ratings */
+
+export async function rateTitle(userId: string, titleId: string, stars: number, review: string | null) {
+  if (stars < 1 || stars > 5) throw new RuleError('Rating must be between 1 and 5 stars.')
+  await sql`
+    insert into ratings (user_id, title_id, stars, review) values (${userId}, ${titleId}, ${stars}, ${review})
+    on conflict (user_id, title_id) do update set stars = excluded.stars, review = excluded.review, created_at = now()`
+  await sql`
+    update titles t set rating_avg = r.avg, rating_count = r.n
+    from (select round(avg(stars)::numeric,2) avg, count(*) n from ratings where title_id = ${titleId}) r
+    where t.id = ${titleId}`
+  return { ok: true }
+}
