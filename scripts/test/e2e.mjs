@@ -89,3 +89,77 @@ await sql`delete from holds where title_id=${t.id} and user_id=${other.id} and s
 await sql`update loans set renewals_count = 2 where id = ${loan.id}`
 r = await call('/api/loans/renew', 'POST', { loanId: loan.id }, student.id)
 check('renewal cap enforced', r.status === 400, r.data.error)
+
+/* ---------------------------------------------- 9. overdue return posts a fine */
+await sql`update loans set due_at = now() - interval '5 days' where id = ${loan.id}`
+const before = Number((await sql`select coalesce(sum(amount),0)::text as s from fines where user_id=${student.id} and status='unpaid'`)[0].s)
+
+// put another reader in the queue so the copy should be promoted, not shelved
+await sql`insert into holds (title_id, user_id, status) values (${t.id}, ${other.id}, 'queued')`
+r = await call('/api/desk/return', 'POST', { accession: heldCopy.accession_number }, staff.id)
+check('return records 5 days late', r.data.daysLate === 5, JSON.stringify(r.data))
+check('fine is 5 x 10 taka', r.data.fine === 50, String(r.data.fine))
+check('copy passed to next in queue', r.data.promoted === true)
+
+const after = Number((await sql`select coalesce(sum(amount),0)::text as s from fines where user_id=${student.id} and status='unpaid'`)[0].s)
+check('fine added to the account', after - before === 50, `${before} -> ${after}`)
+
+const [copyNow] = await sql`select status from copies where id=${heldCopy.id}`
+check('copy is held for the next reader', copyNow.status === 'held', copyNow.status)
+
+const [ledgerRow] = await sql`select type, amount from ledger_entries where user_id=${student.id} order by created_at desc limit 1`
+check('ledger charge written', ledgerRow?.type === 'charge' && Number(ledgerRow.amount) === 50)
+
+/* ---------------------------------------------- 10. payment clears everything */
+r = await call('/api/payments', 'POST', { method: 'bkash' }, student.id)
+check('payment succeeds', r.status === 200, `${r.data.reference} for ${r.data.total}`)
+const [{ s: outstanding }] = await sql`select coalesce(sum(amount),0)::text as s from fines where user_id=${student.id} and status='unpaid'`
+check('nothing outstanding after payment', Number(outstanding) === 0, outstanding)
+
+/* ---------------------------------------------- 11. room booking rules */
+const [room] = await sql`select id from rooms order by name limit 1`
+const slot = new Date(); slot.setDate(slot.getDate() + 2); slot.setHours(11, 0, 0, 0)
+await sql`delete from room_bookings where room_id=${room.id} and slot_start=${slot}`
+r = await call('/api/rooms/bookings', 'POST', { roomId: room.id, slotStart: slot.toISOString() }, student.id)
+check('book a free slot', r.status === 200, r.data.error)
+const bookingId = r.data.id
+r = await call('/api/rooms/bookings', 'POST', { roomId: room.id, slotStart: slot.toISOString() }, other.id)
+check('double booking rejected', r.status === 400, r.data.error)
+r = await call('/api/rooms/bookings', 'PATCH', { bookingId }, student.id)
+check('check-in refused outside the window', r.status === 400, r.data.error)
+r = await call('/api/rooms/bookings', 'DELETE', { bookingId }, other.id)
+check('another reader cannot cancel my booking', r.status === 403, r.data.error)
+await call('/api/rooms/bookings', 'DELETE', { bookingId }, student.id)
+
+const badSlot = new Date(); badSlot.setDate(badSlot.getDate() + 2); badSlot.setHours(23, 0, 0, 0)
+r = await call('/api/rooms/bookings', 'POST', { roomId: room.id, slotStart: badSlot.toISOString() }, student.id)
+check('out-of-hours slot refused', r.status === 400, r.data.error)
+
+/* ---------------------------------------------- 12. reference copies never leave */
+const [ref] = await sql`select accession_number from copies where copy_type='reference' and status='available' limit 1`
+if (ref) {
+  r = await call('/api/desk/issue', 'POST', { accession: ref.accession_number, member: student.uiu_id }, staff.id)
+  check('reference copy cannot be issued', r.status === 400, r.data.error)
+}
+
+/* ---------------------------------------------- 13. auth */
+const anon = await fetch(`${BASE}/api/holds`, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ titleId: t.id }),
+})
+check('unauthenticated request rejected', anon.status === 401)
+
+/* ---------------------------------------------- 14. ratings */
+r = await call('/api/ratings', 'POST', { titleId: t.id, stars: 5, review: 'e2e check' }, student.id)
+check('rating saved', r.status === 200, r.data.error)
+r = await call('/api/ratings', 'POST', { titleId: t.id, stars: 9 }, student.id)
+check('out-of-range rating rejected', r.status === 400, r.data.error)
+
+/* ---------------------------------------------- cleanup */
+await sql`delete from ratings where user_id=${student.id} and review='e2e check'`
+await sql`delete from holds where title_id=${t.id} and user_id=${other.id}`
+await sql`update copies set status='available', due_back=null where id=${heldCopy.id}`
+
+console.log(`\n${ok.length} passed, ${bad.length} failed`)
+if (bad.length) console.log('FAILURES:\n' + bad.map((b) => '  - ' + b).join('\n'))
+await sql.end()
+process.exit(bad.length ? 1 : 0)
