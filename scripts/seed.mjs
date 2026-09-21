@@ -1,7 +1,7 @@
 import postgres from 'postgres'
 import { BOOKS, JOURNALS, THESES, EXTRA_AUTHORS, INTERESTS, SUMMARY_TEMPLATES } from './data/books.mjs'
 
-const sql = postgres(process.env.DATABASE_URL, { ssl: 'require', max: 1, prepare: false })
+const sql = postgres(process.env.DATABASE_URL, { ssl: process.env.DATABASE_SSL === 'disable' ? false : 'require', max: 1, prepare: false })
 
 // deterministic PRNG so every reseed produces the same demo
 let s = 20260920

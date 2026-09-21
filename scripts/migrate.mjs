@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import postgres from 'postgres'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const sql = postgres(process.env.DATABASE_URL, { ssl: 'require', max: 1, prepare: false })
+const sql = postgres(process.env.DATABASE_URL, { ssl: process.env.DATABASE_SSL === 'disable' ? false : 'require', max: 1, prepare: false })
 
 const TABLES = [
   'notifications', 'occupancy_readings', 'room_bookings', 'rooms',
