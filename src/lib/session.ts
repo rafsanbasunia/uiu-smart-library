@@ -5,6 +5,13 @@ import type { SessionUser } from './types'
 
 export const SESSION_COOKIE = 'uiu_lib_uid'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** True if `v` is shaped like a UUID — safe to bind against a uuid column. */
+export function isUuid(v: unknown): v is string {
+  return typeof v === 'string' && UUID.test(v)
+}
+
 /**
  * Mock authentication. The deck specifies UIU single sign-on (same credentials
  * as UCAM); there is no UCAM endpoint available to a student project, so the
@@ -15,7 +22,9 @@ export const SESSION_COOKIE = 'uiu_lib_uid'
 export const getSession = cache(async (): Promise<SessionUser | null> => {
   const jar = await cookies()
   const id = jar.get(SESSION_COOKIE)?.value
-  if (!id) return null
+  // users.id is a uuid: anything else would make Postgres raise, turning a
+  // stale or edited cookie into a crashed page instead of a sign-in prompt.
+  if (!isUuid(id)) return null
   const rows = await sql<SessionUser[]>`
     select id, uiu_id, name, email, role, department, avatar_hue
     from users where id = ${id} and active limit 1`

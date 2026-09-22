@@ -1,11 +1,12 @@
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
-import { SESSION_COOKIE } from '@/lib/session'
+import { SESSION_COOKIE, isUuid } from '@/lib/session'
 
 /** Demo role switcher. Not part of the production sign-on design. */
 export async function POST(req: Request) {
-  const { userId } = await req.json()
+  const { userId } = (await req.json().catch(() => ({}))) as { userId?: unknown }
+  if (!isUuid(userId)) return NextResponse.json({ error: 'Unknown account' }, { status: 404 })
   const rows = await sql<{ id: string }[]>`select id from users where id = ${userId} and active`
   if (!rows[0]) return NextResponse.json({ error: 'Unknown account' }, { status: 404 })
   const jar = await cookies()

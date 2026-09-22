@@ -31,9 +31,3 @@ export async function signOut() {
   jar.delete(SESSION_COOKIE)
   redirect('/login')
 }
-
-/** Role switcher — a demo convenience, not part of the production design. */
-export async function switchUser(userId: string) {
-  const jar = await cookies()
-  jar.set(SESSION_COOKIE, userId, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 60 * 60 * 24 * 30 })
-}
