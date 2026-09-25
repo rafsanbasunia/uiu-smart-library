@@ -71,6 +71,13 @@ export const DELETE = route<{ id: string }>(async ({ body }) => {
     select 1 from loans l join copies c on c.id = l.copy_id
     where c.title_id = ${body.id} and l.returned_at is null`
   if (onLoan) throw new RuleError('Copies of this title are still on loan.')
+  // Loans and fines keep a reference to the title: they are the library's
+  // circulation record and feed the reports, so a title that has ever been
+  // lent is withdrawn (its copies marked lost) rather than deleted.
+  const [history] = await sql`select 1 from loans where title_id = ${body.id} limit 1`
+  if (history) {
+    throw new RuleError('This title has circulation history, so it cannot be deleted. Mark its copies lost to withdraw it.')
+  }
   await sql`delete from titles where id = ${body.id}`
   return { ok: true }
 }, { staff: true })
