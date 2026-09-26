@@ -37,7 +37,11 @@ export function ShelfMap({ copies }: { copies: CopyRow[] }) {
               </span>
             </figcaption>
 
-            <div className="overflow-x-auto p-4">
+            {/* `relative` makes this scroller the containing block for the
+                bays' sr-only labels. They are absolutely positioned, and
+                without it they escaped the scroller and widened the whole page
+                past the screen on a phone. */}
+            <div className="relative overflow-x-auto p-4">
               <div className="min-w-[520px]">
                 {/* bay numbers */}
                 <div className="mb-1 flex gap-[3px] pl-5">
