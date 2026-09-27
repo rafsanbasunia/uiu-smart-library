@@ -6,6 +6,7 @@ import { Empty, SectionHead, TitleRowCard } from '@/components/ui'
 import { IconFilter, IconSearch } from '@/components/icons'
 import { TYPE_LABEL } from '@/lib/format'
 import { SaveSearch } from '@/components/save-search'
+import { FilterPanel } from '@/components/filter-panel'
 
 export const metadata = { title: 'Catalogue' }
 
@@ -118,14 +119,17 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
       <div className="grid gap-6 lg:grid-cols-[236px_1fr]">
         {/* ---------------------------------------------- filters */}
         <aside className="lg:sticky lg:top-20 lg:self-start">
-          <details open className="card overflow-hidden p-0 lg:[&]:open">
-            <summary className="flex cursor-pointer items-center gap-2 border-b border-line px-4 py-3 text-sm font-medium lg:cursor-default">
-              <IconFilter className="size-4 text-ink-3" />
-              Filters
-              {active.length > 0 && (
-                <span className="ml-auto pill bg-brand-soft text-brand">{active.length}</span>
-              )}
-            </summary>
+          <FilterPanel
+            summary={
+              <>
+                <IconFilter className="size-4 text-ink-3" />
+                Filters
+                {active.length > 0 && (
+                  <span className="ml-auto pill bg-brand-soft text-brand">{active.length}</span>
+                )}
+              </>
+            }
+          >
 
             <div className="space-y-5 px-4 py-4">
               <Link
@@ -169,7 +173,7 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
                 </Link>
               )}
             </div>
-          </details>
+          </FilterPanel>
         </aside>
 
         {/* ---------------------------------------------- results */}
