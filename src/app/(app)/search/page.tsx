@@ -12,6 +12,12 @@ export const metadata = { title: 'Catalogue' }
 
 type Q = Record<string, string | string[] | undefined>
 
+/** A whole number from the query string, or undefined if it is not one. */
+function int(v: string | string[] | undefined, min: number, max: number) {
+  const n = Number(str(v))
+  return Number.isInteger(n) && n >= min && n <= max ? n : undefined
+}
+
 function str(v: string | string[] | undefined) {
   return Array.isArray(v) ? v[0] : v
 }
@@ -49,10 +55,14 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
     zone: str(sp.zone),
     language: str(sp.language),
     available: str(sp.available) === '1',
-    yearFrom: str(sp.yearFrom) ? Number(str(sp.yearFrom)) : undefined,
-    yearTo: str(sp.yearTo) ? Number(str(sp.yearTo)) : undefined,
-    sort: (str(sp.sort) as SearchParams['sort']) ?? 'relevance',
-    page: Number(str(sp.page) ?? 1),
+    // Query-string numbers are untrusted: "?page=abc" used to reach SQL as NaN
+    // and crash the page. Anything that is not a sensible integer is ignored.
+    yearFrom: int(sp.yearFrom, 1000, 3000),
+    yearTo: int(sp.yearTo, 1000, 3000),
+    sort: SORTS.some(([key]) => key === str(sp.sort))
+      ? (str(sp.sort) as SearchParams['sort'])
+      : 'relevance',
+    page: int(sp.page, 1, 10000) ?? 1,
     perPage: 20,
   }
 
