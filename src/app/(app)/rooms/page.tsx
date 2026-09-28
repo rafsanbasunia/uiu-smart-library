@@ -19,7 +19,12 @@ export default async function RoomsPage({ searchParams }: { searchParams: Promis
   // Dates here are library calendar days, so they are derived in Dhaka time
   // rather than from the server clock (Vercel runs in UTC).
   const todayISO = libraryDate()
-  const date = sp.date ?? todayISO
+  // An unparseable ?date= used to throw "Invalid time value" and crash the
+  // page; only a real calendar day in YYYY-MM-DD form is honoured.
+  const asked = sp.date ?? ''
+  const noon = new Date(`${asked}T12:00:00+06:00`)
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(asked) && !Number.isNaN(noon.getTime()) && libraryDate(noon) === asked
+  const date = valid ? asked : todayISO
 
   const [rooms, bookings, mine, occupancy] = await Promise.all([
     getRooms(),
