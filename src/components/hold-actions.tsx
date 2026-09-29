@@ -26,8 +26,13 @@ export function HoldActions({
       <div className="inline-flex gap-1.5">
         {status === 'ready' ? (
           <>
-            <button className="btn btn-ghost px-2 py-1 text-xs" onClick={() => act('collected')} disabled={busy}>
-              Collected
+            <button
+              className="btn btn-ghost px-2 py-1 text-xs"
+              onClick={() => act('collected')}
+              disabled={busy}
+              title="Issue the held copy to this reader"
+            >
+              Issue
             </button>
             <button className="btn btn-ghost px-2 py-1 text-xs text-bad" onClick={() => act('expire')} disabled={busy}>
               Expire
