@@ -1,7 +1,7 @@
 import postgres from 'postgres'
 
 const BASE = process.env.BASE_URL ?? 'http://localhost:3000'
-const sql = postgres(process.env.DATABASE_URL, { ssl: 'require', max: 1, prepare: false })
+const sql = postgres(process.env.DATABASE_URL, { ssl: process.env.DATABASE_SSL === 'disable' ? false : 'require', max: 1, prepare: false })
 
 const ok = []
 const bad = []
@@ -153,6 +153,90 @@ r = await call('/api/ratings', 'POST', { titleId: t.id, stars: 5, review: 'e2e c
 check('rating saved', r.status === 200, r.data.error)
 r = await call('/api/ratings', 'POST', { titleId: t.id, stars: 9 }, student.id)
 check('out-of-range rating rejected', r.status === 400, r.data.error)
+
+/* ---------------------------------------------- 15. regressions */
+// Each of these was a real bug: a 500, a copy given out twice, or a copy that
+// went missing from circulation.
+
+// two readers reserving the last free copy at once must not both get it
+{
+  const [one] = await sql`
+    select t.id from titles t where t.type='print'
+      and (select count(*) from copies c where c.title_id=t.id and c.status='available' and c.copy_type<>'reference')=1
+      and not exists (select 1 from holds h where h.title_id=t.id and h.status in ('queued','ready'))
+      and not exists (select 1 from loans l where l.title_id=t.id and l.returned_at is null
+                      and l.user_id in (${student.id}, ${other.id}))
+    limit 1`
+  if (one) {
+    await Promise.all([
+      call('/api/holds', 'POST', { titleId: one.id }, student.id),
+      call('/api/holds', 'POST', { titleId: one.id }, other.id),
+    ])
+    const [{ n }] = await sql`select count(*)::int n from holds where title_id=${one.id} and status='ready'`
+    check('one free copy is never given to two readers', n === 1, `${n} ready holds`)
+    await sql`update holds set status='cancelled' where title_id=${one.id} and status in ('queued','ready')
+              and user_id in (${student.id}, ${other.id})`
+    await sql`update copies set status='available' where title_id=${one.id} and status='held'`
+  }
+}
+
+// cancelling a reservation that was already collected must not free a lent copy
+{
+  r = await call('/api/holds', 'POST', { titleId: t.id }, student.id)
+  const holdId = r.data.holdId
+  const [cp] = await sql`select accession_number from copies where id=(select copy_id from holds where id=${holdId})`
+  if (cp) {
+    await call('/api/desk/issue', 'POST', { accession: cp.accession_number, member: student.uiu_id }, staff.id)
+    r = await call('/api/holds', 'DELETE', { holdId }, student.id)
+    const [after] = await sql`select status::text s from copies where accession_number=${cp.accession_number}`
+    check('a collected reservation cannot be cancelled', r.status === 400 && after.s === 'on_loan', `${r.status}, copy ${after.s}`)
+    await call('/api/desk/return', 'POST', { accession: cp.accession_number }, staff.id)
+  } else {
+    await sql`update holds set status='cancelled' where id=${holdId}`
+  }
+}
+
+// marking a reservation collected issues the loan instead of stranding the copy
+{
+  r = await call('/api/holds', 'POST', { titleId: t.id }, student.id)
+  const holdId = r.data.holdId
+  r = await call('/api/staff/holds', 'PATCH', { holdId, action: 'collected' }, staff.id)
+  const [cp] = await sql`select c.accession_number, c.status::text s,
+      (select count(*)::int from loans l where l.copy_id=c.id and l.returned_at is null) loans
+    from copies c where c.id=(select copy_id from holds where id=${holdId})`
+  check('staff "collected" issues a loan', r.status === 200 && cp?.s === 'on_loan' && cp?.loans === 1,
+    `${r.status}, copy ${cp?.s}, ${cp?.loans} loan(s)`)
+  if (cp) await call('/api/desk/return', 'POST', { accession: cp.accession_number }, staff.id)
+}
+
+// room slots must sit on the grid and end by closing time
+{
+  const day = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10)
+  r = await call('/api/rooms/bookings', 'POST', { roomId: room.id, slotStart: `${day}T20:00:00+06:00` }, student.id)
+  check('a slot running past closing is refused', r.status === 400, r.data.error)
+  r = await call('/api/rooms/bookings', 'POST', { roomId: room.id, slotStart: `${day}T10:37:00+06:00` }, student.id)
+  check('an off-grid slot is refused', r.status === 400, r.data.error)
+}
+
+// bad input is a client error, never a 500
+r = await call('/api/holds', 'POST', { titleId: 'not-a-uuid' }, student.id)
+check('a malformed id is a 404, not a 500', r.status === 404, `${r.status}`)
+r = await call('/api/ratings', 'POST', { titleId: t.id, stars: 3.5 }, student.id)
+check('a fractional rating is refused', r.status === 400, `${r.status}`)
+r = await call('/api/lists', 'POST', { name: 'e2e', visibility: 'bogus' }, student.id)
+check('an unknown list visibility is a 400', r.status === 400, `${r.status}`)
+{
+  const res = await fetch(`${BASE}/api/holds`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: 'uiu_lib_uid=garbage' },
+    body: JSON.stringify({ titleId: t.id }),
+  })
+  check('a garbage session cookie is a 401', res.status === 401, `${res.status}`)
+}
+{
+  const [lent] = await sql`select title_id id from loans where returned_at is not null limit 1`
+  r = await call('/api/staff/titles', 'DELETE', { id: lent.id }, staff.id)
+  check('a title with loan history is not deleted', r.status === 400, `${r.status}`)
+}
 
 /* ---------------------------------------------- cleanup */
 await sql`delete from ratings where user_id=${student.id} and review='e2e check'`
