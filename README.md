@@ -26,6 +26,8 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY  publishable key
 DATABASE_URL                   Postgres connection string
 ```
 
+**Local Postgres.** The scripts and the app also run against a plain local PostgreSQL 15+ (it needs the `pg_trgm` and `pgcrypto` extensions, which ship with it). Point `DATABASE_URL` at it and set `DATABASE_SSL=disable`, since a local server usually has no TLS.
+
 **Connection note.** New Supabase projects publish the direct database host (`db.<ref>.supabase.co`) over IPv6 only. On an IPv4-only machine that hostname will not resolve, so this project connects through the session pooler instead — `postgres.<ref>@aws-0-<region>.pooler.supabase.com:5432`. The pooler region is not always the same as the project region; you can find the exact string under **Project settings → Database → Connection string → Session pooler**. Transaction-mode pooling also requires `prepare: false`, which [src/lib/db.ts](src/lib/db.ts) sets.
 
 ---
@@ -90,10 +92,21 @@ Enforced server-side in [src/lib/circulation.ts](src/lib/circulation.ts) and cov
 
 ```bash
 npm run dev            # or next start
-node --env-file=.env.local scripts/test/e2e.mjs
+npm run test:e2e
 ```
 
-The suite drives the real API against the real database and covers 30 rules end to end: reserving, queue promotion, desk issue and return, renewal caps, fine posting, payment settlement, room booking conflicts, ownership checks and authentication.
+The suite drives the real API against the real database and covers 40 rules end to end: reserving, queue promotion, desk issue and return, renewal caps, fine posting, payment settlement, room booking conflicts, ownership checks and authentication — plus regression checks that two readers can never be given the same copy, that a collected reservation cannot be cancelled, and that malformed input is refused rather than crashing.
+
+Every state change that reads before it writes (reserving, issuing, returning, paying, booking) runs in a single transaction with row locks, so concurrent requests cannot both claim the same copy, slot or fine.
+
+### Checks
+
+```bash
+npm run lint           # TypeScript check (tsc --noEmit)
+npm run build          # needs no database credentials
+```
+
+`lint` runs the TypeScript compiler. ESLint is not wired up yet: `typescript-eslint`, which every TypeScript ESLint setup depends on, does not support TypeScript 7 at the time of writing. GitHub Actions runs the typecheck and build on every push.
 
 ---
 
