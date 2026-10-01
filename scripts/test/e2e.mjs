@@ -238,6 +238,18 @@ check('an unknown list visibility is a 400', r.status === 400, `${r.status}`)
   check('a title with loan history is not deleted', r.status === 400, `${r.status}`)
 }
 
+// the Supabase Data API must not be a way around the rules above
+{
+  const open = await sql`
+    select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity`
+  check('every table has row level security', open.length === 0, open.map((o) => o.relname).join(', '))
+  const [api] = await sql`
+    select count(*)::int as n from information_schema.role_table_grants
+    where table_schema = 'public' and grantee in ('anon', 'authenticated')`
+  check('the API roles hold no table grants', api.n === 0, `${api.n} grants`)
+}
+
 /* ---------------------------------------------- cleanup */
 await sql`delete from ratings where user_id=${student.id} and review='e2e check'`
 await sql`delete from holds where title_id=${t.id} and user_id=${other.id}`
