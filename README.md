@@ -21,10 +21,10 @@ npm run dev                    # http://localhost:3000
 ### Environment
 
 ```
-NEXT_PUBLIC_SUPABASE_URL       your Supabase project URL
-NEXT_PUBLIC_SUPABASE_ANON_KEY  publishable key
-DATABASE_URL                   Postgres connection string
+DATABASE_URL   Postgres connection string (server only — never prefix it with NEXT_PUBLIC_)
 ```
+
+The app talks to Postgres directly and does not use the Supabase client, so it needs no project URL or anon key. The schema turns on row level security for every table and revokes the `anon` and `authenticated` grants, which closes Supabase's auto-generated REST API; the app connects as the owner of the tables, which row level security does not restrict.
 
 **Local Postgres.** The scripts and the app also run against a plain local PostgreSQL 15+ (it needs the `pg_trgm` and `pgcrypto` extensions, which ship with it). Point `DATABASE_URL` at it and set `DATABASE_SSL=disable`, since a local server usually has no TLS.
 
@@ -95,7 +95,7 @@ npm run dev            # or next start
 npm run test:e2e
 ```
 
-The suite drives the real API against the real database and covers 40 rules end to end: reserving, queue promotion, desk issue and return, renewal caps, fine posting, payment settlement, room booking conflicts, ownership checks and authentication — plus regression checks that two readers can never be given the same copy, that a collected reservation cannot be cancelled, and that malformed input is refused rather than crashing.
+The suite drives the real API against the real database and covers 42 rules end to end: reserving, queue promotion, desk issue and return, renewal caps, fine posting, payment settlement, room booking conflicts, ownership checks and authentication — plus regression checks that two readers can never be given the same copy, that a collected reservation cannot be cancelled, that malformed input is refused rather than crashing, and that no table is reachable through the Supabase API.
 
 Every state change that reads before it writes (reserving, issuing, returning, paying, booking) runs in a single transaction with row locks, so concurrent requests cannot both claim the same copy, slot or fine.
 
